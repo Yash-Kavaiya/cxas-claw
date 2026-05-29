@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cxas-claw"
-version = "0.2.0"
+version = "0.3.0"
 description = "CX Agent Studio CLI Agent & Workspace — interactive shell, REPL, chat, and full cxas command coverage"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -24,6 +24,7 @@ dependencies = [
   "python-dotenv",
   "pandas",
   "tabulate",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

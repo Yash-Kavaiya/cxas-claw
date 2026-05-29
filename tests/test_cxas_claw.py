@@ -1,5 +1,5 @@
 """
-Tests for cxas_claw v0.2.0
+Tests for cxas_claw v0.3.0
 Entry point: cxclaw
 """
 
@@ -25,7 +25,7 @@ from cxas_claw.scratchpad import ScratchpadSession
 # ================================================================== #
 
 def test_version():
-    assert __version__ == "0.2.0"
+    assert __version__ == "0.3.0"
 
 
 # ================================================================== #
@@ -49,7 +49,7 @@ def test_version_flag():
     runner = CliRunner()
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.0" in result.output
+    assert "0.3.0" in result.output
 
 
 # ================================================================== #
@@ -202,3 +202,70 @@ def test_run_command(mock_run):
     args = mock_run.call_args[0]
     assert "run" in args
     assert "--wait" in args
+
+
+# ================================================================== #
+#  doctor command
+# ================================================================== #
+
+def test_doctor_runs():
+    """doctor should always produce output and exit 0."""
+    runner = CliRunner()
+    result = runner.invoke(main, ["doctor"])
+    # exit code should be 0 even when warnings present
+    assert result.exit_code == 0
+    assert "Python version" in result.output or "PASS" in result.output or "WARN" in result.output
+
+
+# ================================================================== #
+#  eval command
+# ================================================================== #
+
+def test_eval_passes(tmp_path):
+    """eval should pass when response contains expected_contains."""
+    import yaml as _yaml
+    eval_file = tmp_path / "eval.yaml"
+    eval_file.write_text(_yaml.dump([
+        {"utterance": "hello", "expected_contains": "hi"}
+    ]))
+
+    mock_client = MagicMock()
+    mock_client.resolve_app.return_value = "projects/p/locations/l/apps/a"
+
+    mock_session = MagicMock()
+    mock_session.send.return_value = "hi there!"
+
+    with patch("cxas_claw.cli._client", return_value=mock_client), \
+         patch("cxas_claw.scratchpad.ScratchpadSession", return_value=mock_session):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "eval", "--app-name", "my-app", "--file", str(eval_file), "--output", "json"
+        ])
+    assert result.exit_code == 0
+    assert "PASS" in result.output
+
+
+def test_eval_fails_on_error(tmp_path):
+    """eval with --fail-on-error should exit 1 if any case fails."""
+    import yaml as _yaml
+    eval_file = tmp_path / "eval.yaml"
+    eval_file.write_text(_yaml.dump([
+        {"utterance": "hello", "expected_contains": "goodbye"}
+    ]))
+
+    mock_client = MagicMock()
+    mock_client.resolve_app.return_value = "projects/p/locations/l/apps/a"
+
+    mock_session = MagicMock()
+    mock_session.send.return_value = "hi there!"
+
+    with patch("cxas_claw.cli._client", return_value=mock_client), \
+         patch("cxas_claw.scratchpad.ScratchpadSession", return_value=mock_session):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "eval", "--app-name", "my-app", "--file", str(eval_file),
+            "--output", "json", "--fail-on-error"
+        ])
+    assert result.exit_code == 1
+    assert "FAIL" in result.output
+

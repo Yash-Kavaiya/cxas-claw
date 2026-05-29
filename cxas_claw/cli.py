@@ -907,4 +907,182 @@ def mcp_invoke(tool_name, params, server_url):
         sys.exit(1)
     result = client.invoke_tool(tool_name, parameters)
     console.print_json(json.dumps(result, default=str, indent=2))
-    client.close()
+
+
+# ------------------------------------------------------------------ #
+# doctor — health-check command
+# ------------------------------------------------------------------ #
+
+@main.command("doctor")
+@click.pass_context
+def doctor(ctx):
+    """Check cxclaw setup: credentials, active profile, cxas install, ADC."""
+    import shutil
+    from rich.table import Table
+
+    table = Table(title="cxclaw Doctor", show_header=True, header_style="bold cyan")
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Detail")
+
+    def ok(label, detail=""):
+        table.add_row(label, "[green]PASS[/green]", detail)
+
+    def fail(label, detail=""):
+        table.add_row(label, "[red]FAIL[/red]", detail)
+
+    def warn_row(label, detail=""):
+        table.add_row(label, "[yellow]WARN[/yellow]", detail)
+
+    # 1. cxas CLI available?
+    cxas_bin = shutil.which("cxas")
+    if cxas_bin:
+        ok("cxas CLI installed", cxas_bin)
+    else:
+        fail("cxas CLI installed", "Run: pip install cxas-scrapi")
+
+    # 2. Active profile
+    from cxas_claw.profile import Profile
+    profile = Profile.get_active()
+    if profile:
+        ok("Active profile", f"{profile.name} (project={profile.project_id}, loc={profile.location})")
+    else:
+        warn_row("Active profile", "No active profile. Run: cxclaw profile create <name> && cxclaw profile activate <name>")
+
+    # 3. Credentials
+    adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    gcreds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or (profile.credentials_file if profile else None)
+    if gcreds and Path(gcreds).exists():
+        ok("Service account key", gcreds)
+    elif adc:
+        fail("Service account key", f"GOOGLE_APPLICATION_CREDENTIALS points to missing file: {adc}")
+    else:
+        # check gcloud ADC
+        adc_path = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        if adc_path.exists():
+            ok("ADC (gcloud auth)", str(adc_path))
+        else:
+            warn_row("ADC (gcloud auth)", "No ADC found. Run: gcloud auth application-default login")
+
+    # 4. OAUTH token
+    token = os.environ.get("CXAS_OAUTH_TOKEN", "") or (profile.oauth_token if profile else "")
+    if token:
+        ok("CXAS_OAUTH_TOKEN", f"{token[:10]}…")
+    else:
+        warn_row("CXAS_OAUTH_TOKEN", "Not set — OK if using service account / ADC")
+
+    # 5. dfcx_scrapi importable?
+    try:
+        import dfcx_scrapi  # type: ignore  # noqa: F401
+        import importlib.metadata as _m
+        ver = _m.version("dfcx-scrapi")
+        ok("dfcx_scrapi (cxas-scrapi)", f"v{ver}")
+    except Exception as exc:
+        fail("dfcx_scrapi (cxas-scrapi)", str(exc))
+
+    # 6. Python version
+    import sys as _sys
+    py = f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}"
+    if _sys.version_info >= (3, 10):
+        ok("Python version", py)
+    else:
+        fail("Python version", f"{py} — need >=3.10")
+
+    console.print(table)
+
+
+# ------------------------------------------------------------------ #
+# eval — batch utterance evaluation (cxclaw-native)
+# ------------------------------------------------------------------ #
+
+@main.command("eval")
+@click.option("--app-name", required=True, help="Full app resource name or display name.")
+@click.option("--file", "eval_file", required=True,
+              type=click.Path(exists=True), help="YAML/JSON file with test utterances.")
+@click.option("--project-id", default=None)
+@click.option("--location", default=None)
+@click.option("--output", "-o", default="table", type=click.Choice(["table", "json", "csv"]))
+@click.option("--fail-on-error", is_flag=True, default=False,
+              help="Exit code 1 if any utterance fails.")
+@click.pass_context
+def eval_cmd(ctx, app_name, eval_file, project_id, location, output, fail_on_error):
+    """Run a batch utterance evaluation against a CXAS app.
+
+    The eval file is a YAML or JSON list of test cases:
+
+    \b
+    - utterance: "I need help with my bill"
+      expected_intent: billing_inquiry   # optional
+      expected_contains: "billing"       # optional substring check
+    - utterance: "cancel my subscription"
+    """
+    import yaml  # type: ignore
+    client = _client(ctx, project_id=project_id, location=location)
+    try:
+        app = client.resolve_app(app_name)
+    except Exception as exc:
+        error(str(exc)); sys.exit(1)
+
+    with open(eval_file) as f:
+        raw = f.read()
+    try:
+        cases = yaml.safe_load(raw)
+    except Exception:
+        cases = json.loads(raw)
+
+    if not isinstance(cases, list) or not cases:
+        error("Eval file must be a non-empty YAML/JSON list of test cases.")
+        sys.exit(1)
+
+    results = []
+    any_fail = False
+    for i, case in enumerate(cases, 1):
+        utterance = case.get("utterance", "")
+        expected_intent = case.get("expected_intent")
+        expected_contains = case.get("expected_contains")
+        if not utterance:
+            warn(f"Case {i}: missing 'utterance' — skipping")
+            continue
+
+        try:
+            from cxas_claw.scratchpad import ScratchpadSession
+            session = ScratchpadSession(client=client, app_name=app)
+            response = session.send(utterance)
+            session.close()
+            response_text = response if isinstance(response, str) else json.dumps(response, default=str)
+        except Exception as exc:
+            response_text = f"ERROR: {exc}"
+            results.append({
+                "case": i, "utterance": utterance,
+                "response": response_text, "pass": "FAIL", "reason": str(exc)
+            })
+            any_fail = True
+            continue
+
+        passed = True
+        reason = ""
+        if expected_contains and expected_contains.lower() not in response_text.lower():
+            passed = False
+            reason = f"expected '{expected_contains}' in response"
+        if expected_intent:
+            # best-effort: look for intent in response dict
+            if expected_intent.lower() not in response_text.lower():
+                passed = False
+                reason += f" expected_intent '{expected_intent}' not detected"
+
+        if not passed:
+            any_fail = True
+
+        results.append({
+            "case": i,
+            "utterance": utterance[:60],
+            "response": response_text[:80],
+            "pass": "PASS" if passed else "FAIL",
+            "reason": reason.strip(),
+        })
+
+    total = len(results)
+    passed_count = sum(1 for r in results if r["pass"] == "PASS")
+    render(results, output=output, title=f"Eval Results — {passed_count}/{total} passed")
+    if any_fail and fail_on_error:
+        sys.exit(1)
