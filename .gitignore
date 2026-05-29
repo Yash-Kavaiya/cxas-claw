@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Secrets / credentials
+*.json
+!pyproject.toml
+*.pem
+*.key
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# cxclaw profile data (never commit credentials)
+~/.cxas-claw/
